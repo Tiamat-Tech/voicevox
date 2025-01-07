@@ -1,4 +1,9 @@
-import { Action, ActionContext, ActionsBase, Dispatch } from "./vuex";
+import {
+  ActionsBase,
+  DotNotationAction,
+  DotNotationActionContext,
+  DotNotationDispatch,
+} from "./vuex";
 import {
   AllActions,
   AllGetters,
@@ -6,39 +11,64 @@ import {
   UiStoreState,
   UiStoreTypes,
 } from "./type";
-import { ActivePointScrollMode } from "@/type/preload";
 import { createPartialStore } from "./vuex";
+import { ActivePointScrollMode } from "@/type/preload";
+import {
+  MessageDialogOptions,
+  ConfirmDialogOptions,
+  WarningDialogOptions,
+  LoadingScreenOption,
+  NotifyAndNotShowAgainButtonOption,
+  connectAndExportTextWithDialog,
+  generateAndConnectAndSaveAudioWithDialog,
+  generateAndSaveOneAudioWithDialog,
+  hideAllLoadingScreen,
+  multiGenerateAndSaveAudioWithDialog,
+  showAlertDialog,
+  showConfirmDialog,
+  showLoadingScreen,
+  showNotifyAndNotShowAgainButton,
+  showWarningDialog,
+} from "@/components/Dialog/Dialog";
+import { objectEntries } from "@/helpers/typedEntries";
 
 export function createUILockAction<S, A extends ActionsBase, K extends keyof A>(
   action: (
-    context: ActionContext<S, S, AllGetters, AllActions, AllMutations>,
-    payload: Parameters<A[K]>[0]
+    context: DotNotationActionContext<
+      S,
+      S,
+      AllGetters,
+      AllActions,
+      AllMutations
+    >,
+    payload: Parameters<A[K]>[0],
   ) => ReturnType<A[K]> extends Promise<unknown>
     ? ReturnType<A[K]>
-    : Promise<ReturnType<A[K]>>
-): Action<S, S, A, K, AllGetters, AllActions, AllMutations> {
+    : Promise<ReturnType<A[K]>>,
+): DotNotationAction<S, S, A, K, AllGetters, AllActions, AllMutations> {
   return (context, payload: Parameters<A[K]>[0]) => {
-    context.commit("LOCK_UI");
+    context.mutations.LOCK_UI();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-call
     return action(context, payload).finally(() => {
-      context.commit("UNLOCK_UI");
+      context.mutations.UNLOCK_UI();
     });
   };
 }
 
 export function withProgress<T>(
   action: Promise<T>,
-  dispatch: Dispatch<AllActions>
+  actions: DotNotationDispatch<AllActions>,
 ): Promise<T> {
-  dispatch("START_PROGRESS");
-  return action.finally(() => dispatch("RESET_PROGRESS"));
+  void actions.START_PROGRESS();
+  return action.finally(() => actions.RESET_PROGRESS());
 }
 
 export const uiStoreState: UiStoreState = {
   uiLockCount: 0,
   dialogLockCount: 0,
+  reloadingLock: false,
   inheritAudioInfo: true,
   activePointScrollMode: "OFF",
-  isHelpDialogOpen: false,
   isSettingDialogOpen: false,
   isHotkeySettingDialogOpen: false,
   isToolbarSettingDialogOpen: false,
@@ -48,10 +78,14 @@ export const uiStoreState: UiStoreState = {
   isAcceptTermsDialogOpen: false,
   isDictionaryManageDialogOpen: false,
   isEngineManageDialogOpen: false,
+  isUpdateNotificationDialogOpen: false,
+  isExportSongAudioDialogOpen: false,
+  isImportSongProjectDialogOpen: false,
   isMaximized: false,
   isPinned: false,
   isFullscreen: false,
   progress: -1,
+  isVuexReady: false,
 };
 
 export const uiStore = createPartialStore<UiStoreTypes>({
@@ -77,7 +111,7 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     action: createUILockAction(
       async (_, { callback }: { callback: () => Promise<void> }) => {
         await callback();
-      }
+      },
     ),
   },
 
@@ -85,8 +119,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.uiLockCount++;
     },
-    action({ commit }) {
-      commit("LOCK_UI");
+    action({ mutations }) {
+      mutations.LOCK_UI();
     },
   },
 
@@ -96,13 +130,13 @@ export const uiStore = createPartialStore<UiStoreTypes>({
         state.uiLockCount--;
       } else {
         // eslint-disable-next-line no-console
-        window.electron.logWarn(
-          "UNLOCK_UI is called when state.uiLockCount == 0"
+        window.backend.logWarn(
+          "UNLOCK_UI is called when state.uiLockCount == 0",
         );
       }
     },
-    action({ commit }) {
-      commit("UNLOCK_UI");
+    action({ mutations }) {
+      mutations.UNLOCK_UI();
     },
   },
 
@@ -110,8 +144,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.dialogLockCount++;
     },
-    action({ commit }) {
-      commit("LOCK_MENUBAR");
+    action({ mutations }) {
+      mutations.LOCK_MENUBAR();
     },
   },
 
@@ -119,8 +153,20 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.dialogLockCount--;
     },
-    action({ commit }) {
-      commit("UNLOCK_MENUBAR");
+    action({ mutations }) {
+      mutations.UNLOCK_MENUBAR();
+    },
+  },
+
+  /**
+   * 再読み込み中。UNLOCKされることはない。
+   */
+  LOCK_RELOADING: {
+    mutation(state) {
+      state.reloadingLock = true;
+    },
+    action({ mutations }) {
+      mutations.LOCK_RELOADING();
     },
   },
 
@@ -131,68 +177,113 @@ export const uiStore = createPartialStore<UiStoreTypes>({
   },
 
   SET_DIALOG_OPEN: {
-    mutation(
-      state,
-      dialogState: {
-        isDefaultStyleSelectDialogOpen?: boolean;
-        isAcceptRetrieveTelemetryDialogOpen?: boolean;
-        isAcceptTermsDialogOpen?: boolean;
-        isDictionaryManageDialogOpen?: boolean;
-        isHelpDialogOpen?: boolean;
-        isSettingDialogOpen?: boolean;
-        isHotkeySettingDialogOpen?: boolean;
-        isToolbarSettingDialogOpen?: boolean;
-        isCharacterOrderDialogOpen?: boolean;
-        isEngineManageDialogOpen?: boolean;
-      }
-    ) {
-      for (const [key, value] of Object.entries(dialogState)) {
+    mutation(state, dialogState) {
+      for (const [key, value] of objectEntries(dialogState)) {
         if (!(key in state)) {
           throw new Error(`Unknown dialog state: ${key}`);
+        }
+        if (value == undefined) {
+          throw new Error(`Invalid dialog state: ${key}`);
         }
         state[key] = value;
       }
     },
-    async action({ state, commit }, dialogState) {
-      for (const [key, value] of Object.entries(dialogState)) {
+    async action({ state, mutations }, dialogState) {
+      for (const [key, value] of objectEntries(dialogState)) {
         if (state[key] === value) continue;
 
         if (value) {
-          commit("LOCK_UI");
-          commit("LOCK_MENUBAR");
+          mutations.LOCK_UI();
+          mutations.LOCK_MENUBAR();
         } else {
-          commit("UNLOCK_UI");
-          commit("UNLOCK_MENUBAR");
+          mutations.UNLOCK_UI();
+          mutations.UNLOCK_MENUBAR();
         }
       }
 
-      commit("SET_DIALOG_OPEN", dialogState);
+      mutations.SET_DIALOG_OPEN(dialogState);
+    },
+  },
+
+  SHOW_ALERT_DIALOG: {
+    action: createUILockAction(async (_, payload: MessageDialogOptions) => {
+      return await showAlertDialog(payload);
+    }),
+  },
+
+  SHOW_CONFIRM_DIALOG: {
+    action: createUILockAction(async (_, payload: ConfirmDialogOptions) => {
+      return await showConfirmDialog(payload);
+    }),
+  },
+
+  SHOW_WARNING_DIALOG: {
+    action: createUILockAction(async (_, payload: WarningDialogOptions) => {
+      return await showWarningDialog(payload);
+    }),
+  },
+
+  SHOW_NOTIFY_AND_NOT_SHOW_AGAIN_BUTTON: {
+    action({ actions }, payload: NotifyAndNotShowAgainButtonOption) {
+      showNotifyAndNotShowAgainButton({ actions }, payload);
+    },
+  },
+
+  SHOW_LOADING_SCREEN: {
+    action(_, payload: LoadingScreenOption) {
+      showLoadingScreen(payload);
+    },
+  },
+
+  HIDE_ALL_LOADING_SCREEN: {
+    action() {
+      hideAllLoadingScreen();
     },
   },
 
   HYDRATE_UI_STORE: {
-    async action({ commit }) {
-      commit("SET_INHERIT_AUDIOINFO", {
-        inheritAudioInfo: await window.electron.getSetting("inheritAudioInfo"),
+    async action({ mutations }) {
+      mutations.SET_INHERIT_AUDIOINFO({
+        inheritAudioInfo: await window.backend.getSetting("inheritAudioInfo"),
       });
 
-      commit("SET_ACTIVE_POINT_SCROLL_MODE", {
-        activePointScrollMode: await window.electron.getSetting(
-          "activePointScrollMode"
+      mutations.SET_ACTIVE_POINT_SCROLL_MODE({
+        activePointScrollMode: await window.backend.getSetting(
+          "activePointScrollMode",
         ),
       });
 
       // electron-window-stateがvuex初期化前に働くので
       // ここで改めてelectron windowの最大化状態をVuex storeに同期
-      if (await window.electron.isMaximizedWindow()) {
-        commit("DETECT_MAXIMIZED");
+      if (await window.backend.isMaximizedWindow()) {
+        mutations.DETECT_MAXIMIZED();
       }
     },
   },
 
   ON_VUEX_READY: {
-    action() {
-      window.electron.vuexReady();
+    mutation(state) {
+      state.isVuexReady = true;
+    },
+    action({ mutations }) {
+      window.backend.vuexReady();
+      mutations.ON_VUEX_READY();
+    },
+  },
+
+  // Vuexが準備できるまで待つ
+  WAIT_VUEX_READY: {
+    async action({ state }, { timeout }) {
+      if (state.isVuexReady) return;
+
+      let vuexReadyTimeout = 0;
+      while (!state.isVuexReady) {
+        if (vuexReadyTimeout >= timeout) {
+          throw new Error("Vuexが準備できませんでした");
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        vuexReadyTimeout += 300;
+      }
     },
   },
 
@@ -201,13 +292,13 @@ export const uiStore = createPartialStore<UiStoreTypes>({
       state.inheritAudioInfo = inheritAudioInfo;
     },
     async action(
-      { commit },
-      { inheritAudioInfo }: { inheritAudioInfo: boolean }
+      { mutations },
+      { inheritAudioInfo }: { inheritAudioInfo: boolean },
     ) {
-      commit("SET_INHERIT_AUDIOINFO", {
-        inheritAudioInfo: await window.electron.setSetting(
+      mutations.SET_INHERIT_AUDIOINFO({
+        inheritAudioInfo: await window.backend.setSetting(
           "inheritAudioInfo",
-          inheritAudioInfo
+          inheritAudioInfo,
         ),
       });
     },
@@ -218,22 +309,32 @@ export const uiStore = createPartialStore<UiStoreTypes>({
       state,
       {
         activePointScrollMode,
-      }: { activePointScrollMode: ActivePointScrollMode }
+      }: { activePointScrollMode: ActivePointScrollMode },
     ) {
       state.activePointScrollMode = activePointScrollMode;
     },
     async action(
-      { commit },
+      { mutations },
       {
         activePointScrollMode,
-      }: { activePointScrollMode: ActivePointScrollMode }
+      }: { activePointScrollMode: ActivePointScrollMode },
     ) {
-      commit("SET_ACTIVE_POINT_SCROLL_MODE", {
-        activePointScrollMode: await window.electron.setSetting(
+      mutations.SET_ACTIVE_POINT_SCROLL_MODE({
+        activePointScrollMode: await window.backend.setSetting(
           "activePointScrollMode",
-          activePointScrollMode
+          activePointScrollMode,
         ),
       });
+    },
+  },
+
+  /**
+   * 選択可能なテーマをセットする。
+   * NOTE: カスタムテーマが導入された場合を見越して残している。
+   */
+  SET_AVAILABLE_THEMES: {
+    mutation(state, { themes }) {
+      state.availableThemes = themes;
     },
   },
 
@@ -241,8 +342,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isMaximized = false;
     },
-    action({ commit }) {
-      commit("DETECT_UNMAXIMIZED");
+    action({ mutations }) {
+      mutations.DETECT_UNMAXIMIZED();
     },
   },
 
@@ -250,8 +351,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isMaximized = true;
     },
-    action({ commit }) {
-      commit("DETECT_MAXIMIZED");
+    action({ mutations }) {
+      mutations.DETECT_MAXIMIZED();
     },
   },
 
@@ -259,8 +360,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isPinned = true;
     },
-    action({ commit }) {
-      commit("DETECT_PINNED");
+    action({ mutations }) {
+      mutations.DETECT_PINNED();
     },
   },
 
@@ -268,8 +369,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isPinned = false;
     },
-    action({ commit }) {
-      commit("DETECT_UNPINNED");
+    action({ mutations }) {
+      mutations.DETECT_UNPINNED();
     },
   },
 
@@ -277,8 +378,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isFullscreen = true;
     },
-    action({ commit }) {
-      commit("DETECT_ENTER_FULLSCREEN");
+    action({ mutations }) {
+      mutations.DETECT_ENTER_FULLSCREEN();
     },
   },
 
@@ -286,8 +387,8 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     mutation(state) {
       state.isFullscreen = false;
     },
-    action({ commit }) {
-      commit("DETECT_LEAVE_FULLSCREEN");
+    action({ mutations }) {
+      mutations.DETECT_LEAVE_FULLSCREEN();
     },
   },
 
@@ -297,38 +398,72 @@ export const uiStore = createPartialStore<UiStoreTypes>({
     },
   },
 
+  /** UIの拡大 */
+  ZOOM_IN: {
+    action() {
+      window.backend.zoomIn();
+    },
+  },
+
+  /** UIの縮小 */
+  ZOOM_OUT: {
+    action() {
+      window.backend.zoomOut();
+    },
+  },
+
+  /** UIの拡大率のリセット */
+  ZOOM_RESET: {
+    action() {
+      window.backend.zoomReset();
+    },
+  },
+
   CHECK_EDITED_AND_NOT_SAVE: {
-    async action({ getters }) {
+    /**
+     * プロジェクトファイル未保存の場合、保存するかどうかを確認する。
+     * 保存後にウィンドウを閉じるか、アプリを再読み込みする。
+     * 保存がキャンセルされた場合は何もしない。
+     */
+    async action({ actions, getters }, obj) {
+      await actions.SING_STOP_AUDIO(); // FIXME: ON_BEFORE_QUITTINGなどを作成して移動すべき
+
       if (getters.IS_EDITED) {
-        const result: number = await window.electron.showQuestionDialog({
-          type: "info",
-          title: "警告",
-          message:
-            "プロジェクトの変更が保存されていません。\n" +
-            "変更を破棄してもよろしいですか？",
-          buttons: ["破棄", "キャンセル"],
-          cancelId: 1,
-        });
-        if (result == 1) {
+        const result = await actions.SAVE_OR_DISCARD_PROJECT_FILE({});
+        if (result == "canceled") {
           return;
         }
       }
 
-      window.electron.closeWindow();
+      await actions.STOP_RENDERING(); // FIXME: FINISH_VUEXなどを作成して移動すべき
+
+      if (obj.closeOrReload == "close") {
+        window.backend.closeWindow();
+      } else if (obj.closeOrReload == "reload") {
+        await actions.RELOAD_APP({
+          isMultiEngineOffMode: obj.isMultiEngineOffMode,
+        });
+      }
     },
   },
 
-  RESTART_APP: {
-    action(_, { isMultiEngineOffMode }: { isMultiEngineOffMode?: boolean }) {
-      window.electron.restartApp({
-        isMultiEngineOffMode: !!isMultiEngineOffMode,
-      });
-    },
+  RELOAD_APP: {
+    action: createUILockAction(
+      async (
+        { actions },
+        { isMultiEngineOffMode }: { isMultiEngineOffMode?: boolean },
+      ) => {
+        await actions.LOCK_RELOADING();
+        await window.backend.reloadApp({
+          isMultiEngineOffMode: !!isMultiEngineOffMode,
+        });
+      },
+    ),
   },
 
   START_PROGRESS: {
-    action({ dispatch }) {
-      dispatch("SET_PROGRESS", { progress: 0 });
+    action({ actions }) {
+      void actions.SET_PROGRESS({ progress: 0 });
     },
   },
 
@@ -337,21 +472,81 @@ export const uiStore = createPartialStore<UiStoreTypes>({
       state.progress = progress;
     },
     // progressは-1(非表示)と[0, 1]の範囲を取る
-    action({ commit }, { progress }) {
-      commit("SET_PROGRESS", { progress });
+    action({ mutations }, { progress }) {
+      mutations.SET_PROGRESS({ progress });
     },
   },
 
   SET_PROGRESS_FROM_COUNT: {
-    action({ commit }, { finishedCount, totalCount }) {
-      commit("SET_PROGRESS", { progress: finishedCount / totalCount });
+    action({ mutations }, { finishedCount, totalCount }) {
+      mutations.SET_PROGRESS({ progress: finishedCount / totalCount });
     },
   },
 
   RESET_PROGRESS: {
-    action({ dispatch }) {
+    action({ actions }) {
       // -1で非表示
-      dispatch("SET_PROGRESS", { progress: -1 });
+      void actions.SET_PROGRESS({ progress: -1 });
+    },
+  },
+
+  // TODO: この4つのアクションをVue側に移動したい
+  SHOW_GENERATE_AND_SAVE_ALL_AUDIO_DIALOG: {
+    async action({ state, actions }) {
+      await multiGenerateAndSaveAudioWithDialog({
+        audioKeys: state.audioKeys,
+        disableNotifyOnGenerate: state.confirmedTips.notifyOnGenerate,
+        actions,
+      });
+    },
+  },
+
+  SHOW_GENERATE_AND_CONNECT_ALL_AUDIO_DIALOG: {
+    async action({ actions, state }) {
+      await generateAndConnectAndSaveAudioWithDialog({
+        actions,
+        disableNotifyOnGenerate: state.confirmedTips.notifyOnGenerate,
+      });
+    },
+  },
+
+  SHOW_GENERATE_AND_SAVE_SELECTED_AUDIO_DIALOG: {
+    async action({ getters, actions, state }) {
+      const activeAudioKey = getters.ACTIVE_AUDIO_KEY;
+      if (activeAudioKey == undefined) {
+        void actions.SHOW_ALERT_DIALOG({
+          title: "テキスト欄が選択されていません",
+          message: "音声を書き出したいテキスト欄を選択してください。",
+        });
+        return;
+      }
+
+      const selectedAudioKeys = getters.SELECTED_AUDIO_KEYS;
+      if (
+        state.experimentalSetting.enableMultiSelect &&
+        selectedAudioKeys.length > 1
+      ) {
+        await multiGenerateAndSaveAudioWithDialog({
+          audioKeys: selectedAudioKeys,
+          actions: actions,
+          disableNotifyOnGenerate: state.confirmedTips.notifyOnGenerate,
+        });
+      } else {
+        await generateAndSaveOneAudioWithDialog({
+          audioKey: activeAudioKey,
+          disableNotifyOnGenerate: state.confirmedTips.notifyOnGenerate,
+          actions: actions,
+        });
+      }
+    },
+  },
+
+  SHOW_CONNECT_AND_EXPORT_TEXT_DIALOG: {
+    async action({ actions, state }) {
+      await connectAndExportTextWithDialog({
+        actions,
+        disableNotifyOnGenerate: state.confirmedTips.notifyOnGenerate,
+      });
     },
   },
 });

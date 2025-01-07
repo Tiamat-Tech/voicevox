@@ -123,25 +123,43 @@ EOS
 fi
 echo "[-] 7z command: ${COMMAND_7Z}"
 
-echo "[+] Checking runtime prerequisites..."
+LATEST_RELEASE_URL=$REPO_URL/releases/latest
 
-PATH=${PATH}:/usr/local/sbin:/usr/sbin:/sbin
-if ! command -v ldconfig &> /dev/null; then
-    cat << EOS && exit 1
+if [ -z "${VERSION}" ]; then
+    echo "[+] Checking the latest version..."
+
+    # releases/tag/{version}
+    RELEASE_TAG_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${LATEST_RELEASE_URL}")
+
+    # extract version (release tag name) from URL
+    VERSION=$(echo "${RELEASE_TAG_URL}" | sed 's/.*\/\(.*\)$/\1/')
+    echo "[-] Install version: ${VERSION} (latest)"
+else
+    echo "[-] Install version: ${VERSION}"
+fi
+
+IFS=" " read -r -a VERSION_ARRAY <<< "${VERSION//[.+-]/ }"
+if [ "${VERSION_ARRAY[0]}" -eq 0 ] && [ "${VERSION_ARRAY[1]}" -le 14 ]; then
+    # Check when version < 0.15
+    echo "[+] Checking runtime prerequisites..."
+
+    PATH=${PATH}:/usr/local/sbin:/usr/sbin:/sbin
+    if ! command -v ldconfig &> /dev/null; then
+        cat << EOS && exit 1
 [!] Command 'ldconfig' not found
 
 Required to check existence of required libraries.
 You must add a directory of contain ldconfig command to PATH environment variable.
 
 EOS
-fi
+    fi
 
-if { ldconfig -p | grep 'libsndfile\.so';} &>/dev/null; then
-    echo "[-] libsndfile: OK"
-elif [ -d /usr/local/Cellar/libsndfile ]; then
-    echo "[-] libsndfile: OK"
-else
-    cat << 'EOS'
+    if { ldconfig -p | grep 'libsndfile\.so';} &>/dev/null; then
+        echo "[-] libsndfile: OK"
+    elif [ -d /usr/local/Cellar/libsndfile ]; then
+        echo "[-] libsndfile: OK"
+    else
+        cat << 'EOS'
 [!] libsndfile: not found
 
 Required to run VOICEVOX ENGINE
@@ -160,24 +178,10 @@ Arch Linux
 MacOS:
     brew install libsndfile
 EOS
-    if [ "${IGNORE_RTCOND}" != "1" ]; then
-        exit 1
+        if [ "${IGNORE_RTCOND}" != "1" ]; then
+            exit 1
+        fi
     fi
-fi
-
-LATEST_RELEASE_URL=$REPO_URL/releases/latest
-
-if [ -z "${VERSION}" ]; then
-    echo "[+] Checking the latest version..."
-
-    # releases/tag/{version}
-    RELEASE_TAG_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' "${LATEST_RELEASE_URL}")
-
-    # extract version (release tag name) from URL
-    VERSION=$(echo "${RELEASE_TAG_URL}" | sed 's/.*\/\(.*\)$/\1/')
-    echo "[-] Install version: ${VERSION} (latest)"
-else
-    echo "[-] Install version: ${VERSION}"
 fi
 
 RELEASE_URL=${REPO_URL}/releases/download/${VERSION}
@@ -401,7 +405,8 @@ DESKTOP_FILE=$(find squashfs-root -maxdepth 1 -name '*.desktop' | head -1)
 chmod +x "${DESKTOP_FILE}"
 
 ESCAPED_APP_DIR=$(echo "$APP_DIR" | sed 's/\//\\\//g')
-sed "s/Exec=.*/Exec=${ESCAPED_APP_DIR}\/${APPIMAGE} %U/" "${DESKTOP_FILE}" > _
+# TODO: --no-sandboxをつけているのはセキュリティが強化されたUbuntu 24.04で動作させるため ref:https://github.com/electron/electron/issues/41066。外せたら外す。
+sed "s/Exec=.*/Exec=${ESCAPED_APP_DIR}\/${APPIMAGE} %U --no-sandbox/" "${DESKTOP_FILE}" > _
 mv _ "${DESKTOP_FILE}"
 
 mkdir -p "${DESKTOP_ENTRY_INSTALL_DIR}"
